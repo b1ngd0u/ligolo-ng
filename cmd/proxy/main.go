@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/nicocha30/ligolo-ng/cmd/proxy/config"
+	"github.com/nicocha30/ligolo-ng/pkg/tailcatutils"
 	"github.com/nicocha30/ligolo-ng/pkg/tlsutils"
 	"log"
 	"os"
@@ -44,7 +45,10 @@ var (
 func main() {
 	var allowDomains []string
 	var verboseFlag = flag.Bool("v", false, "enable verbose mode")
-	var listenInterface = flag.String("laddr", "0.0.0.0:11601", "listening address (prefix with http(s):// for websocket)")
+	var listenInterface = flag.String("laddr", "0.0.0.0:11601", "listening address (prefix with http(s):// for websocket, tailcat:// for tailcat)")
+	var tailcatDERPMap = flag.String("tailcat-derpmap", "", "custom DERP map URL for tailcat transport")
+	var tailcatRegion = flag.Int("tailcat-region", 0, "DERP region ID for tailcat listener (0 = auto-select nearest)")
+	var tailcatDERPOnly = flag.Bool("tailcat-derp-only", false, "force tailcat traffic through DERP relay only (disables direct UDP upgrade)")
 	var enableAutocert = flag.Bool("autocert", false, "automatically request letsencrypt certificates, requires port 80 to be accessible")
 	var enableSelfcert = flag.Bool("selfcert", false, "dynamically generate self-signed certificates")
 	var certFile = flag.String("certfile", "certs/cert.pem", "TLS server certificate")
@@ -157,6 +161,11 @@ func main() {
 			EnableAutocert:  *enableAutocert,
 			EnableSelfcert:  *enableSelfcert,
 		},
+		TailcatConfig: &tailcatutils.Config{
+			DERPMapURL: *tailcatDERPMap,
+			RegionID:   *tailcatRegion,
+			DERPOnly:   *tailcatDERPOnly,
+		},
 	})
 
 	app.ProxyController = &proxyController
@@ -187,7 +196,11 @@ func main() {
 				}()
 
 				var err error
-				yamuxConn, err = yamux.Client(remoteConn, nil)
+				var yamuxCfg *yamux.Config
+				if proxyController.IsTailcat() {
+					yamuxCfg = tailcatutils.NewYamuxConfig()
+				}
+				yamuxConn, err = yamux.Client(remoteConn, yamuxCfg)
 				if err != nil {
 					logrus.Errorf("could not create yamux client, error: %v", err)
 					_ = remoteConn.Close()

@@ -23,8 +23,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 
 	"github.com/coder/websocket"
+	"github.com/nicocha30/ligolo-ng/pkg/tailcatutils"
 	"github.com/nicocha30/ligolo-ng/pkg/tlsutils"
 	"github.com/nicocha30/ligolo-ng/pkg/utils"
 	"github.com/sirupsen/logrus"
@@ -35,12 +37,15 @@ type Controller struct {
 	Connection chan net.Conn
 	startchan  chan error
 	donechan   chan error
+	tailcatMu  sync.RWMutex
+	tailcatURL string
 	ControllerConfig
 }
 
 type ControllerConfig struct {
 	Address           string
 	CertManagerConfig *tlsutils.CertManagerConfig
+	TailcatConfig     *tailcatutils.Config
 	tlsConfig         *tls.Config
 }
 
@@ -57,7 +62,7 @@ func (c *Controller) WaitForFinished() error {
 }
 
 func (c *Controller) GetSelfCertificateSignature() (*tls.Certificate, error) {
-	if c.CertManagerConfig.EnableSelfcert {
+	if c.CertManagerConfig != nil && c.CertManagerConfig.EnableSelfcert && c.tlsConfig != nil {
 		return c.tlsConfig.GetCertificate(nil)
 	}
 	return nil, errors.New("selfcert is not enabled")
@@ -67,6 +72,7 @@ func (c *Controller) ListenAndServe() {
 	url, err := utils.ParseLigoloURL(c.Address)
 	if err != nil {
 		c.startchan <- err
+		return
 	}
 	if url.IsWebsocket() {
 		var listener net.Listener
@@ -105,6 +111,8 @@ func (c *Controller) ListenAndServe() {
 			}),
 		}
 		err = s.Serve(listener)
+	} else if url.IsTailcat() {
+		c.listenTailcat()
 	} else if url.IsValid() {
 		//direct listen with legacy ligolo-ng protocol
 		tlsConfig, err := tlsutils.CertManager(c.CertManagerConfig)

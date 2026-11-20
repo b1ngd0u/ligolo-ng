@@ -51,13 +51,20 @@ func (m *RWEndpoint) Attach(dispatcher stack.NetworkDispatcher) {
 }
 
 func (m *RWEndpoint) dispatchLoop() {
+	bufs := make([][]byte, 1)
+	sizes := make([]int, 1)
 	for {
-		packet := make([]byte, m.mtu)
+		packet := make([]byte, int(m.mtu)+offset)
+		bufs[0] = packet
 		// Complying with macOS bullshit - I bought a Mac Mini to solve this nonsense. @phocean you lied, it sucks
-		n, err := m.wgdev.Read(packet, offset)
+		count, err := m.wgdev.Read(bufs, sizes, offset)
 		if err != nil {
 			break
 		}
+		if count < 1 {
+			continue
+		}
+		n := sizes[0]
 		if n > int(m.mtu) {
 			// Not sure why it happens, discard packet - https://github.com/nicocha30/ligolo-ng/issues/54
 			continue
@@ -105,7 +112,7 @@ func (m *RWEndpoint) WritePacket(pkt stack.PacketBufferPtr) tcpip.Error {
 	// Complying with macOS bullshit
 	offsetBuf := make([]byte, offset)
 
-	if _, err := m.wgdev.Write(append(offsetBuf, buf.Flatten()...), offset); err != nil {
+	if _, err := m.wgdev.Write([][]byte{append(offsetBuf, buf.Flatten()...)}, offset); err != nil {
 		return &tcpip.ErrInvalidEndpointState{}
 	}
 	return nil

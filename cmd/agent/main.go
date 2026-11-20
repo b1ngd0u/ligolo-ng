@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -31,6 +32,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/nicocha30/ligolo-ng/pkg/tailcatutils"
 	"github.com/nicocha30/ligolo-ng/pkg/tlsutils"
 	"github.com/nicocha30/ligolo-ng/pkg/utils"
 
@@ -58,8 +60,11 @@ func main() {
 	var reconnectDelay = flag.Int("reconnect-delay", 20, "reconnection delay in seconds (default: 20)")
 	var reconnectTimeout = flag.Int("reconnect-timeout", 300, "total reconnection timeout in seconds (default: 300 = 5 minutes)")
 	var socksProxy = flag.String("proxy", "", "proxy URL address (http://admin:secret@127.0.0.1:8080) or socks://admin:secret@127.0.0.1:8080")
-	var serverAddr = flag.String("connect", "", "connect to proxy (domain:port)")
-	var bindAddr = flag.String("bind", "", "bind to ip:port")
+	var serverAddr = flag.String("connect", "", "connect to proxy (domain:port, http(s)://host:port, or tailcat://<addr>[:port])")
+	var bindAddr = flag.String("bind", "", "bind to ip:port or tailcat://[:port]")
+	var tailcatDERPMap = flag.String("tailcat-derpmap", "", "custom DERP map URL for tailcat transport")
+	var tailcatRegion = flag.Int("tailcat-region", 0, "DERP region ID for tailcat bind mode (0 = auto-select nearest)")
+	var tailcatDERPOnly = flag.Bool("tailcat-derp-only", false, "force tailcat traffic through DERP relay only (disables direct UDP upgrade)")
 	var userAgent = flag.String("ua", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36", "HTTP User-Agent")
 	var versionFlag = flag.Bool("version", false, "show the current version")
 
@@ -84,7 +89,18 @@ func main() {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
 
+	tcCfg := &tailcatutils.Config{
+		DERPMapURL: *tailcatDERPMap,
+		RegionID:   *tailcatRegion,
+		DERPOnly:   *tailcatDERPOnly,
+	}
+
 	if *bindAddr != "" {
+		if bindURL, err := utils.ParseLigoloURL(*bindAddr); err == nil && bindURL.IsTailcat() {
+			agent.SetUDPTargetFilter(tailcatutils.IsLocalEndpoint)
+			tailcatBind(*bindAddr, tcCfg)
+			return
+		}
 		bind(&tlsConfig, *bindAddr)
 	}
 
@@ -94,14 +110,21 @@ func main() {
 
 	ligoloUrl, err := utils.ParseLigoloURL(*serverAddr)
 	if err != nil {
-		logrus.Fatalf("Invalid connect address, please use http(s)://host:port for websocket or host:port for tcp")
+		logrus.Fatalf("Invalid connect address, please use http(s)://host:port for websocket, tailcat://<addr>[:port] for tailcat, or host:port for tcp")
 	}
 
-	tlsConfig.ServerName = ligoloUrl.Hostname()
+	if !ligoloUrl.IsTailcat() {
+		tlsConfig.ServerName = ligoloUrl.Hostname()
 
-	if *ignoreCertificate {
-		logrus.Warn("warning, certificate validation disabled")
-		tlsConfig.InsecureSkipVerify = true
+		if *ignoreCertificate {
+			logrus.Warn("warning, certificate validation disabled")
+			tlsConfig.InsecureSkipVerify = true
+		}
+	} else {
+		agent.SetUDPTargetFilter(tailcatutils.IsLocalEndpoint)
+		if *socksProxy != "" {
+			logrus.Warn("The -proxy flag is ignored for tailcat:// connections")
+		}
 	}
 
 	// Validate retry and reconnect delays
@@ -127,6 +150,8 @@ func main() {
 		if ligoloUrl.IsWebsocket() {
 			//websocket
 			connSuccess, err = wsconnect(&tlsConfig, *serverAddr, *socksProxy, *userAgent)
+		} else if ligoloUrl.IsTailcat() {
+			connSuccess, err = tailcatConnect(*serverAddr, tcCfg)
 		} else {
 			if *socksProxy != "" {
 				//suppose that scheme is socks:// or socks5://
@@ -350,5 +375,46 @@ func wsconnect(config *tls.Config, wsaddr string, proxy string, useragent string
 			return true, err // Connection was established but now lost
 		}
 		go agent.HandleConn(conn)
+	}
+}
+
+func tailcatConnect(rawURL string, cfg *tailcatutils.Config) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	conn, err := tailcatutils.DialURL(ctx, rawURL, cfg)
+	cancel()
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+
+	return connect(conn)
+}
+
+func tailcatBind(rawURL string, cfg *tailcatutils.Config) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	lis, err := tailcatutils.ListenURL(ctx, rawURL, cfg)
+	cancel()
+	if err != nil {
+		logrus.Fatal(err)
+	}
+	defer lis.Close()
+
+	logrus.Infof("Listening tailcat on %s...", lis.TailcatURL())
+	for {
+		conn, err := lis.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			logrus.Error(err)
+			continue
+		}
+		logrus.Infof("Got connection from: %s\n", conn.RemoteAddr())
+		if connSuccess, err := connect(conn); err != nil {
+			logrus.Error(err)
+		} else if connSuccess {
+			logrus.Info("Connection closed normally")
+		}
+		_ = conn.Close()
 	}
 }

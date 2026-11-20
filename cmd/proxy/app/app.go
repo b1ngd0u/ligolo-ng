@@ -459,6 +459,8 @@ func Run() {
 		},
 	})
 
+	registerTailcatCommands()
+
 	App.AddCommand(&grumble.Command{
 		Name:  "certificate_fingerprint",
 		Help:  "Show the current selfcert fingerprint",
@@ -479,13 +481,16 @@ func Run() {
 	App.AddCommand(&grumble.Command{
 		Name:  "connect_agent",
 		Help:  "Attempt to connect to a bind agent",
-		Usage: "connect_agent --ip [agentip]",
+		Usage: "connect_agent --ip [agentip | tailcat://<addr>[:port]]",
 		Flags: func(f *grumble.Flags) {
-			f.StringL("ip", "", "The agent ip:port")
+			f.StringL("ip", "", "The agent ip:port or tailcat://<addr>[:port]")
 			f.BoolL("ignore-cert", false, "Ignore TLS certificate verification")
 			f.StringL("accept-fingerprint", "", "accept certificates matching the following SHA256 fingerprint (hex format)")
 		},
 		Run: func(c *grumble.Context) error {
+			if target := c.Flags.String("ip"); strings.HasPrefix(target, "tailcat://") {
+				return connectAgentTailcat(target)
+			}
 			tlsConfig := &tls.Config{}
 			tlsConfig.InsecureSkipVerify = true
 			acceptFingerprint := c.Flags.String("accept-fingerprint")

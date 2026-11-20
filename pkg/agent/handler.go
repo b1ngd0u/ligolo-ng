@@ -114,6 +114,11 @@ func HandleConn(conn net.Conn) {
 		encoder := protocol.NewEncoder(conn)
 
 		logrus.Debugf("Got connect request to %s:%d", connRequest.Address, connRequest.Port)
+		if connRequest.Transport == protocol.TransportUDP && isUDPTargetBlocked(connRequest.Address, connRequest.Port) {
+			logrus.Debugf("Blocked UDP connect request to %s:%d (local transport endpoint)", connRequest.Address, connRequest.Port)
+			_ = encoder.Encode(protocol.ConnectResponsePacket{Established: false})
+			return
+		}
 		var network string
 		if connRequest.Transport == protocol.TransportTCP {
 			network = "tcp"

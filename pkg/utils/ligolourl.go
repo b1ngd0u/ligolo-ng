@@ -41,7 +41,7 @@ func (l *LigoloURL) IsWebsocket() bool {
 }
 
 func (l *LigoloURL) IsValid() bool {
-	return l.IsWebsocket() || l.Scheme == ""
+	return l.IsWebsocket() || l.IsTailcat() || l.Scheme == ""
 }
 
 func ParseLigoloURL(rawURL string) (*LigoloURL, error) {
