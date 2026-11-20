@@ -1,0 +1,159 @@
+name: Tailcat Build & Test
+
+on:
+  push:
+    branches:
+      - feat/tailcat
+      - master
+    tags:
+      - "v*-tailcat*"
+  pull_request:
+    branches:
+      - feat/tailcat
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test & Vet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Verify tailcat import isolation boundary
+        run: |
+          BAD=$(grep -rn "github.com/tailscale/tailcat\|tailscale.com/" cmd pkg | grep -v "^pkg/tailcatutils/" || true)
+          if [ -n "$BAD" ]; then
+            echo "ERROR: tailcat/tailscale imports leaked outside pkg/tailcatutils/:"
+            echo "$BAD"
+            exit 1
+          fi
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test (with race detector)
+        run: go test -v -race ./pkg/utils/... ./pkg/tailcatutils/... ./pkg/controller/... ./pkg/protocol/... ./pkg/relay/... ./pkg/proxy/netstack/... ./pkg/agent/...
+
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            ext: ".exe"
+            archive: zip
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Build slim proxy & agent
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          TAILCAT_TAGS=$(grep '^TAILCAT_TAGS=' Makefile | cut -d= -f2-)
+          VERSION="${GITHUB_REF_NAME}"
+          COMMIT="${GITHUB_SHA::8}"
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}"
+
+          PROXY_BIN="dist/ligolo-ng-proxy-${GOOS}_${GOARCH}${{ matrix.ext }}"
+          AGENT_BIN="dist/ligolo-ng-agent-${GOOS}_${GOARCH}${{ matrix.ext }}"
+
+          go build -tags "${TAILCAT_TAGS}" -trimpath -ldflags "${LDFLAGS}" -o "${PROXY_BIN}" cmd/proxy/main.go
+          go build -tags "${TAILCAT_TAGS}" -trimpath -ldflags "${LDFLAGS}" -o "${AGENT_BIN}" cmd/agent/main.go
+
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            zip -9 "ligolo-ng-proxy_${GOOS}_${GOARCH}.zip" "$(basename "${PROXY_BIN}")"
+            zip -9 "ligolo-ng-agent_${GOOS}_${GOARCH}.zip" "$(basename "${AGENT_BIN}")"
+          else
+            tar -czf "ligolo-ng-proxy_${GOOS}_${GOARCH}.tar.gz" "$(basename "${PROXY_BIN}")"
+            tar -czf "ligolo-ng-agent_${GOOS}_${GOARCH}.tar.gz" "$(basename "${AGENT_BIN}")"
+          fi
+          rm -f "$(basename "${PROXY_BIN}")" "$(basename "${AGENT_BIN}")"
+          ls -lh
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ligolo-ng-${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-tailcat')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        working-directory: artifacts
+        run: |
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" artifacts/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Ligolo-ng ${GITHUB_REF_NAME}" \
+            --generate-notes
