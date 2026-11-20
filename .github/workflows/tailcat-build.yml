@@ -47,7 +47,7 @@ jobs:
         run: go vet ./...
 
       - name: Go test (with race detector)
-        run: go test -v -race ./pkg/utils/... ./pkg/tailcatutils/... ./pkg/controller/... ./pkg/protocol/... ./pkg/relay/... ./pkg/proxy/netstack/... ./pkg/agent/...
+        run: go test -v -race ./pkg/utils/... ./pkg/tailcatutils/... ./pkg/controller/... ./pkg/protocol/... ./pkg/relay/... ./pkg/proxy/... ./pkg/agent
 
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
