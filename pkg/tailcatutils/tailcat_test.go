@@ -19,6 +19,7 @@ package tailcatutils
 import (
 	"context"
 	"net"
+	"os"
 	"sync/atomic"
 	"testing"
 
@@ -146,5 +147,28 @@ func TestNewYamuxConfig(t *testing.T) {
 	}
 	if cfg.MaxStreamWindowSize < 16*1024*1024 {
 		t.Fatalf("MaxStreamWindowSize = %d, want >= 16MB", cfg.MaxStreamWindowSize)
+	}
+}
+
+func TestApplyConfigDisablesUDPGSOByDefault(t *testing.T) {
+	orig, hadOrig := os.LookupEnv("TS_DEBUG_DISABLE_UDP_GSO")
+	t.Cleanup(func() {
+		if hadOrig {
+			_ = os.Setenv("TS_DEBUG_DISABLE_UDP_GSO", orig)
+		} else {
+			_ = os.Unsetenv("TS_DEBUG_DISABLE_UDP_GSO")
+		}
+	})
+
+	_ = os.Unsetenv("TS_DEBUG_DISABLE_UDP_GSO")
+	applyConfig(nil)
+	if got := os.Getenv("TS_DEBUG_DISABLE_UDP_GSO"); got != "true" {
+		t.Fatalf("TS_DEBUG_DISABLE_UDP_GSO = %q, want \"true\"", got)
+	}
+
+	_ = os.Setenv("TS_DEBUG_DISABLE_UDP_GSO", "false")
+	applyConfig(nil)
+	if got := os.Getenv("TS_DEBUG_DISABLE_UDP_GSO"); got != "false" {
+		t.Fatalf("explicit TS_DEBUG_DISABLE_UDP_GSO=false was overwritten with %q", got)
 	}
 }

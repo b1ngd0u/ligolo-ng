@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"os/user"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,11 +37,17 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var listenerConntrack map[int32]net.Conn
-var listenerMap map[int32]interface{}
-var connTrackID int32
-var listenerID int32
-var sessionID string
+var (
+	listenerConntrackMu sync.RWMutex
+	listenerConntrack   map[int32]net.Conn
+	connTrackID         int32
+
+	listenerMapMu sync.Mutex
+	listenerMap   map[int32]interface{}
+	listenerID    int32
+
+	sessionID string
+)
 
 func init() {
 	listenerConntrack = make(map[int32]net.Conn)
@@ -69,9 +76,12 @@ func (s *Listener) ListenAndServe(connTrackChan chan int32) error {
 		if err != nil {
 			return err
 		}
+		listenerConntrackMu.Lock()
 		connTrackID++
-		connTrackChan <- connTrackID
-		listenerConntrack[connTrackID] = conn
+		id := connTrackID
+		listenerConntrack[id] = conn
+		listenerConntrackMu.Unlock()
+		connTrackChan <- id
 	}
 }
 
@@ -214,15 +224,19 @@ func HandleConn(conn net.Conn) {
 		encoder := protocol.NewEncoder(conn)
 
 		var err error
-		if lis, ok := listenerMap[closeRequest.ListenerID]; ok {
+		listenerMapMu.Lock()
+		lis, ok := listenerMap[closeRequest.ListenerID]
+		if ok {
+			delete(listenerMap, closeRequest.ListenerID)
+		}
+		listenerMapMu.Unlock()
+		if ok {
 			if l, ok := lis.(net.Listener); ok {
 				l.Close()
 			}
 			if l, ok := lis.(*net.UDPConn); ok {
 				l.Close()
 			}
-			// Remove closed listener from map to avoid leaks
-			delete(listenerMap, closeRequest.ListenerID)
 		} else {
 			err = errors.New("invalid listener id")
 		}
@@ -257,9 +271,13 @@ func HandleConn(conn net.Conn) {
 				}
 				return
 			}
-			listenerMap[listenerID] = listener.Listener
+			listenerMapMu.Lock()
+			assignedID := listenerID
+			listenerID++
+			listenerMap[assignedID] = listener.Listener
+			listenerMapMu.Unlock()
 			listenerResponse := protocol.ListenerResponsePacket{
-				ListenerID: listenerID,
+				ListenerID: assignedID,
 				Err:        false,
 				ErrString:  "",
 			}
@@ -286,9 +304,13 @@ func HandleConn(conn net.Conn) {
 				}
 				return
 			}
-			listenerMap[listenerID] = udplistener.UDPConn
+			listenerMapMu.Lock()
+			assignedID := listenerID
+			listenerID++
+			listenerMap[assignedID] = udplistener.UDPConn
+			listenerMapMu.Unlock()
 			listenerResponse := protocol.ListenerResponsePacket{
-				ListenerID: listenerID,
+				ListenerID: assignedID,
 				Err:        false,
 				ErrString:  "",
 			}
@@ -303,7 +325,6 @@ func HandleConn(conn net.Conn) {
 			}()
 		}
 
-		listenerID++
 		if listenRequest.Network == "tcp" {
 			for {
 				var bindResponse protocol.ListenerBindReponse
@@ -336,7 +357,10 @@ func HandleConn(conn net.Conn) {
 		socketEncDec := protocol.NewEncoderDecoder(conn)
 
 		var sockResponse protocol.ListenerSockResponsePacket
-		if _, ok := listenerConntrack[sockRequest.SockID]; !ok {
+		listenerConntrackMu.RLock()
+		netConn, ok := listenerConntrack[sockRequest.SockID]
+		listenerConntrackMu.RUnlock()
+		if !ok {
 			// Handle error
 			sockResponse.ErrString = "invalid or unexistant SockID"
 			sockResponse.Err = true
@@ -355,20 +379,24 @@ func HandleConn(conn net.Conn) {
 			logrus.Error(err)
 			return
 		}
-		netConn := listenerConntrack[sockRequest.SockID]
+
+		cleanupSock := func() {
+			netConn.Close()
+			listenerConntrackMu.Lock()
+			delete(listenerConntrack, sockRequest.SockID)
+			listenerConntrackMu.Unlock()
+		}
 
 		ready, err := protocol.PayloadAs[protocol.ListenerSocketConnectionReady](socketEncDec.Payload)
 		if err != nil {
 			logrus.Error(err)
-			netConn.Close()
-			delete(listenerConntrack, sockRequest.SockID)
+			cleanupSock()
 			return
 		}
 
 		if err := ready.Err; err != false {
 			logrus.Debug("Socket relay session failed: error from proxy")
-			netConn.Close()
-			delete(listenerConntrack, sockRequest.SockID)
+			cleanupSock()
 			return
 		}
 
@@ -376,8 +404,7 @@ func HandleConn(conn net.Conn) {
 		if err := relay.StartRelay(netConn, conn); err != nil {
 			logrus.Error(err)
 		}
-		netConn.Close()
-		delete(listenerConntrack, sockRequest.SockID)
+		cleanupSock()
 
 	case *protocol.AgentKillRequestPacket:
 		os.Exit(0)

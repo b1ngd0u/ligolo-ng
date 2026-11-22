@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 
@@ -49,6 +50,12 @@ type Config struct {
 }
 
 func applyConfig(cfg *Config) {
+	// Disable Linux UDP GSO by default to prevent packet blackholing on paths
+	// with MTU < 1440 (PPPoE, VPNs, Tailscale, nested tunnels; tailcat#168).
+	// Users can still opt back in by explicitly setting TS_DEBUG_DISABLE_UDP_GSO=false.
+	if _, set := os.LookupEnv("TS_DEBUG_DISABLE_UDP_GSO"); !set {
+		envknob.Setenv("TS_DEBUG_DISABLE_UDP_GSO", "true")
+	}
 	if cfg != nil && cfg.DERPOnly {
 		envknob.Setenv("TS_DEBUG_ALWAYS_USE_DERP", "true")
 	}

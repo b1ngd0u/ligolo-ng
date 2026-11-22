@@ -31,7 +31,9 @@ ligolo-ng » connect_agent --ip tailcat://tc...
 - `-tailcat-derp-only`：強制所有 Tailcat 流量皆經由 DERP 中繼，不進行直連 UDP 升級（Proxy 與 Agent 皆支援，等同 `TS_DEBUG_ALWAYS_USE_DERP=true`）。
 - `-v`：開啟 debug 模式時會一併輸出 `[tailcat]` 內部連線與 NAT 穿透追蹤日誌。
 
-> **自動 TUN 路由迴圈防護**：Agent 啟用 `tailcat://` 時會自動追蹤自身的 `magicsock` 本地 UDP 端點並拒絕經由 Ligolo 轉發 UDP 至該端點，避免 Proxy 將 Agent 所在內網網段加入 `ligolo` TUN 路由時，觸發 `magicsock` 誤將 WireGuard 通道切進 TUN 造成的自循環斷線；同時保留經由真實 LAN/WAN 升級高速直連 P2P 的能力。
+> **自動 TUN 路由迴圈防護與低 MTU 穩定性**：
+> - Agent 啟用 `tailcat://` 時會自動追蹤自身的 `magicsock` 本地 UDP 端點並拒絕經由 Ligolo 轉發 UDP 至該端點，避免 Proxy 將 Agent 所在內網網段加入 `ligolo` TUN 路由時，觸發 `magicsock` 誤將 WireGuard 通道切進 TUN 造成的自循環斷線；同時保留經由真實 LAN/WAN 升級高速直連 P2P 的能力。
+> - 為避免在低 MTU 路徑（MTU < 1440，如 PPPoE、Tailscale、VPN 或巢狀隧道）觸發 Linux UDP GSO 黑洞卡死（`tailscale/tailcat#168`），`pkg/tailcatutils` 預設會套用 `TS_DEBUG_DISABLE_UDP_GSO=true`；若在確定 MTU 1500 的環境下欲手動啟用 UDP GSO，可顯式設定 `TS_DEBUG_DISABLE_UDP_GSO=false`。
 
 ### 4. 縮小執行檔體積（選用）
 ```bash
